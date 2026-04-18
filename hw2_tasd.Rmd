@@ -1,0 +1,142 @@
+---
+title: "HW2_text_as_data"
+author: "Ishita Vaid"
+date: "2026-02-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#call packages
+
+library("readr")
+library("dplyr")
+library("tidyr")
+library("stringr")
+library("tidytext")
+library("ggplot2")
+library("forcats")
+library("tibble")
+library("scales")
+library("tidytext")
+```
+
+```{r}
+# file paths to call files
+file_a <- "texts/A07594__Circle_of_Commerce.txt"
+file_b <- "texts/B14801_Free_Trade.txt"
+
+# Read the raw text files into R
+text_a <- read_file(file_a)
+text_b <- read_file(file_b)
+
+# Combine into a tibble for tidytext workflows
+texts <- tibble(
+  doc_title = c("Text A", "Text B"),
+  text = c(text_a, text_b) 
+)
+
+texts
+```
+
+```{r}
+#tokenize and clean text
+
+tidy_tokens <- texts %>%
+  unnest_tokens(word, text) %>%       
+  mutate(word = str_to_lower(word)) %>% 
+  anti_join(all_stopwords, by = "word") 
+
+tidy_tokens
+
+```
+
+```{r}
+#join tokens to bing sentiment dictionary
+
+bing <- get_sentiments("bing")
+
+tokens_sentiment <- tidy_tokens %>%
+  inner_join(bing, by = "word")
+
+tokens_sentiment
+
+
+```
+
+```{r}
+#compute raw sentiment totals
+
+sentiment_totals <- tokens_sentiment %>%
+  group_by(doc_title, sentiment) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = sentiment,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  mutate(net_sentiment = positive - negative)
+
+sentiment_totals
+
+
+```
+
+```{r}
+#compute TF-IDF for words in each document
+
+word_counts <- tidy_tokens %>%
+  count(doc_title, word, sort = TRUE)
+
+word_tfidf <- word_counts %>%
+  bind_tf_idf(term = word, document = doc_title, n = n)
+
+word_tfidf
+
+
+```
+
+```{r}
+# Keep only sentiment-bearing words 
+tfidf_sentiment <- word_tfidf %>%
+  inner_join(bing, by = "word")
+
+tfidf_sentiment
+
+```
+
+```{r}
+# Compute TF-IDF–weighted sentiment totals
+
+tfidf_sentiment_summary <- tfidf_sentiment %>%
+  group_by(doc_title, sentiment) %>%
+  summarise(total_tfidf = sum(tf_idf), .groups = "drop") %>%
+  pivot_wider(
+    names_from = sentiment,
+    values_from = total_tfidf,
+    values_fill = 0
+  ) %>%
+  mutate(
+    net_tfidf_sentiment = positive - negative
+  )
+
+tfidf_sentiment_summary
+
+```
+
+```{r}
+#Compare Raw vs. TF-IDF Sentiment
+
+final_sentiment_comparison <- sentiment_totals %>%
+  left_join(tfidf_sentiment_summary, by = "doc_title")
+
+final_sentiment_comparison
+
+```
+
+```{r}
+write_csv(final_sentiment_comparison, "final_sentiment_comparison.csv")
+```
