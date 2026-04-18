@@ -1,0 +1,266 @@
+---
+title: "eda"
+output: html_document
+---
+
+```{r}
+#call packages
+
+library("readr")
+library("dplyr")
+library("tidyr")
+library("stringr")
+library("tidytext")
+library("ggplot2")
+library("forcats")
+library("tibble")
+library("scales")
+library("tidytext")
+library("tidyverse")
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidytext)
+library(tibble)
+library(readr)
+library(tidyverse)
+library(readr)
+library(purrr) 
+library(quanteda)
+library(quanteda.textstats)
+library(stringr)
+
+```
+
+```{r}
+all_texts <- list.files("/Users/Ishita/Desktop/text_data/all_texts", full.names = TRUE)
+all_texts
+```
+
+```{r}
+# create document IDs
+doc_ids <- all_texts %>%
+  basename() %>%
+  str_remove("\\.txt$")
+```
+
+```{r}
+# read in corpus
+corpus_tbl <- tibble(
+  doc_id = doc_ids,
+  file_path = all_texts
+) %>%
+  mutate(text_raw = map_chr(file_path, read_file))
+
+```
+
+```{r}
+# normalize long s (ſ → s)
+# lowercase for consistent token matching
+# light punctuation cleanup to remove OCR / typographic noise
+# No spelling normalization (preserves historical variation)
+
+corpus_tbl <- corpus_tbl %>%
+  mutate(
+    text = text_raw %>%
+      str_replace_all("ſ", "s") %>%
+      str_replace_all("[^[:alnum:]\\s]", " ") %>%
+      str_to_lower()
+  ) %>%
+  select(doc_id, text)
+
+```
+
+**Approach 1: TF-IDF lexical distinctness approach**
+
+```{r}
+corp <- corpus(corpus_tbl, docid_field = "doc_id", text_field = "text")
+
+toks <- tokens(
+  corp,
+  remove_punct = TRUE,
+  remove_numbers = TRUE,
+  remove_symbols = TRUE
+) %>%
+  tokens_remove(stopwords("en"))
+
+dfm_counts <- dfm(toks)
+dfm_tfidf  <- dfm_tfidf(dfm_counts)
+
+# top 10–15 distinctive terms per document (required)
+n_top_terms <- 15
+
+tfidf_long <- convert(dfm_tfidf, to = "data.frame") %>%
+  pivot_longer(-doc_id, names_to = "term", values_to = "tfidf") %>%
+  filter(tfidf > 0) %>%
+  group_by(doc_id) %>%
+  slice_max(tfidf, n = n_top_terms) %>%
+  ungroup()
+
+tfidf_summary <- tfidf_long %>%
+  group_by(doc_id) %>%
+  summarize(top_terms = paste(term, collapse = ", "), .groups = "drop")
+
+tfidf_summary
+```
+
+```{r}
+p_tfidf <- tfidf_long |>
+  mutate(term = reorder_within(term, tfidf, doc_id)) |>
+  ggplot(aes(x = tfidf, y = term, fill = doc_id)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ doc_id, scales = "free", ncol = 4) +
+  scale_y_reordered() +
+  labs(
+    title    = "Top TF-IDF Terms by Document",
+    x        = "TF-IDF weight",
+    y        = NULL
+  ) +
+  theme_minimal(base_size = 9) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 12),
+    strip.text      = element_text(face = "bold", size = 8),
+    axis.text.y     = element_text(size = 7),
+    axis.text.x     = element_text(size = 7),
+    panel.spacing   = unit(0.8, "lines")
+  )
+
+n_docs <- n_distinct(tfidf_long$doc_id)
+plot_height <- ceiling(n_docs / 4) * 2.8
+
+ggsave("tfidf_barchart.png", plot = p_tfidf,
+       width = 14, height = plot_height, dpi = 150, limitsize = FALSE)
+cat("TF-IDF bar chart saved to tfidf_barchart.png\n")
+
+p_tfidf
+```
+
+```{{r}}
+write.csv(tfidf_summary, "tfidf_summary.csv", row.names = FALSE)
+```
+
+**Approach 2: Pearson correlation: similarity and distance between texts**
+
+```{r}
+# Pearson correlation approach
+
+dfm_trimmed <- dfm_trim(dfm_counts, min_termfreq = 5)
+
+sim_r <- textstat_simil(
+  dfm_trimmed,
+  margin = "documents",
+  method = "correlation"
+)
+
+r_mat <- round(as.matrix(sim_r), 3)
+
+# long-format heatmap data
+heat_df <- as.data.frame(r_mat) %>%
+  rownames_to_column("doc_i") %>%
+  pivot_longer(-doc_i, names_to = "doc_j", values_to = "r")
+
+# remove duplicates + self comparisons
+r_pairs <- heat_df %>%
+  filter(doc_i < doc_j)
+
+# most / least similar document pairs (required output)
+most_similar <- r_pairs %>%
+  slice_max(r, n = 2)
+
+least_similar <- r_pairs %>%
+  slice_min(r, n = 2)
+
+# print exact numbers
+cat("Two most similar pairs:\n")
+print(most_similar)
+cat("\nTwo least similar pairs:\n")
+print(least_similar)
+
+# heatmap visualization
+ggplot(heat_df, aes(x = doc_j, y = doc_i, fill = r)) +
+  geom_tile() +
+  coord_fixed() +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  labs(
+    title = "Pearson Correlation Between Documents",
+    x = NULL,
+    y = NULL,
+    fill = "r"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+```
+
+**Approach 3: Syntactic complexity profile**
+
+```{r}
+install.packages("udpipe")
+```
+
+```{r}
+library(udpipe)
+
+udpipe_download_model(language = "english")
+ud_model <- udpipe_load_model("english-ewt-ud-2.5-191206.udpipe")
+
+text1_id <- "text 23"
+text2_id <- "text 7"
+
+text1 <- corpus_tbl$text[corpus_tbl$doc_id == text1_id]
+text2 <- corpus_tbl$text[corpus_tbl$doc_id == text2_id]
+
+ann1 <- as.data.frame(udpipe_annotate(ud_model, x = text1, doc_id = text1_id))
+ann2 <- as.data.frame(udpipe_annotate(ud_model, x = text2, doc_id = text2_id))
+
+get_syntactic_measures <- function(ann, doc_label) {
+  n_sents <- n_distinct(ann$sentence_id)
+  mls <- ann %>% group_by(sentence_id) %>% summarize(n = n(), .groups = "drop") %>% pull(n) %>% mean()
+  n_clauses <- sum(ann$upos == "VERB", na.rm = TRUE)
+  n_dep_clauses <- sum(ann$dep_rel %in% c("ccomp", "xcomp", "advcl", "acl", "relcl"), na.rm = TRUE)
+  n_coord <- sum(ann$dep_rel == "cc", na.rm = TRUE)
+  n_cn <- sum(ann$dep_rel %in% c("amod", "nmod", "compound"), na.rm = TRUE)
+  tibble(
+    doc_id           = doc_label,
+    MLS              = round(mls, 2),
+    C_per_S          = round(n_clauses / n_sents, 2),
+    DepCl_per_S      = round(n_dep_clauses / n_sents, 2),
+    Coord_per_S      = round(n_coord / n_sents, 2),
+    ComplexNom_per_S = round(n_cn / n_sents, 2)
+  )
+}
+
+syntax_table <- bind_rows(
+  get_syntactic_measures(ann1, text1_id),
+  get_syntactic_measures(ann2, text2_id)
+)
+
+get_example_sentence <- function(ann) {
+  ann %>%
+    group_by(sentence_id) %>%
+    summarize(sentence = first(sentence), n_tokens = n(), .groups = "drop") %>%
+    slice_max(n_tokens, n = 1) %>%
+    pull(sentence)
+}
+
+cat("Example sentence — text 23:\n")
+cat(get_example_sentence(ann1), "\n\n")
+
+cat("Example sentence — text 7:\n")
+cat(get_example_sentence(ann2), "\n")
+
+```
+
+```{r}
+syntax_table
+```
